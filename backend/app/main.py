@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.agent.router import route_message
 from app.agent.tools import create_support_ticket
 from app.config import Settings, get_settings
-from app.llm.provider import LLMProvider, StubProvider, get_provider
+from app.llm.provider import LLMProvider, LLMResult, StubProvider, estimated_cost_usd, get_provider
 from app.logging_utils import log_tool_call
 from app.prompts.rag_prompt import RAG_SYSTEM_PROMPT, build_rag_user_prompt
 from app.rag.retrieve import format_context, get_store, retrieve
@@ -56,48 +57,71 @@ def _parse_llm_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
+def _empty_usage() -> LLMResult:
+    return LLMResult(text="", prompt_tokens=0, completion_tokens=0, total_tokens=0)
+
+
+def _meta(elapsed_ms: int, prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:
+    total_tokens = prompt_tokens + completion_tokens
+    return {
+        "elapsed_ms": elapsed_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        # Estimate only — official Flash cache-miss rates, peak/off-peak from UTC clock.
+        "estimated_cost_usd": estimated_cost_usd(prompt_tokens, completion_tokens),
+    }
+
+
 def _answer_from_rag(
     question: str,
     chunks: list[RetrievedChunk],
     provider: LLMProvider,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], LLMResult]:
     if not chunks:
-        return {"type": "abstention", "message": ABSTAIN_MESSAGE, "sources": []}
+        return {"type": "abstention", "message": ABSTAIN_MESSAGE, "sources": []}, _empty_usage()
 
     if isinstance(provider, StubProvider):
-        return {
-            "type": "answer",
-            "answer": chunks[0].text,
-            "sources": _sources_from(chunks),
-            "provider": provider.name,
-        }
+        return (
+            {
+                "type": "answer",
+                "answer": chunks[0].text,
+                "sources": _sources_from(chunks),
+                "provider": provider.name,
+            },
+            _empty_usage(),
+        )
 
     user_prompt = build_rag_user_prompt(question, format_context(chunks))
-    raw = provider.generate(RAG_SYSTEM_PROMPT, user_prompt, temperature=0.0)
-    parsed = _parse_llm_json(raw)
+    result = provider.generate(RAG_SYSTEM_PROMPT, user_prompt, temperature=0.0)
+    parsed = _parse_llm_json(result.text)
     if not parsed or parsed.get("type") == "abstention":
-        return {"type": "abstention", "message": ABSTAIN_MESSAGE, "sources": []}
+        return {"type": "abstention", "message": ABSTAIN_MESSAGE, "sources": []}, result
 
     cited = parsed.get("cited_documents") or []
     cited_set = {name.lower() for name in cited}
     selected = [c for c in chunks if c.document_name.lower() in cited_set] or chunks
-    return {
-        "type": "answer",
-        "answer": parsed.get("answer") or raw,
-        "sources": _sources_from(selected),
-    }
+    return (
+        {
+            "type": "answer",
+            "answer": parsed.get("answer") or result.text,
+            "sources": _sources_from(selected),
+        },
+        result,
+    )
 
 
 def handle_ask(text: str, settings: Settings, provider: LLMProvider) -> dict[str, Any]:
+    started = time.perf_counter()
     decision = route_message(text, provider)
+    prompt_tokens = decision.prompt_tokens
+    completion_tokens = decision.completion_tokens
 
     if decision.route == "clarification":
-        return {"type": "clarification", "message": decision.message}
-
-    if decision.route == "refusal":
-        return {"type": "refusal", "message": decision.message}
-
-    if decision.route == "tool_call":
+        payload: dict[str, Any] = {"type": "clarification", "message": decision.message}
+    elif decision.route == "refusal":
+        payload = {"type": "refusal", "message": decision.message}
+    elif decision.route == "tool_call":
         arguments = {
             "summary": decision.summary,
             "priority": decision.priority or "medium",
@@ -109,15 +133,21 @@ def handle_ask(text: str, settings: Settings, provider: LLMProvider) -> dict[str
             arguments,
             result,
         )
-        return {
+        payload = {
             "type": "tool_call",
             "tool": "create_support_ticket",
             "arguments": arguments,
             "result": result,
         }
+    else:
+        chunks = retrieve(text, settings)
+        payload, usage = _answer_from_rag(text, chunks, provider)
+        prompt_tokens += usage.prompt_tokens
+        completion_tokens += usage.completion_tokens
 
-    chunks = retrieve(text, settings)
-    return _answer_from_rag(text, chunks, provider)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    payload["meta"] = _meta(elapsed_ms, prompt_tokens, completion_tokens)
+    return payload
 
 
 @asynccontextmanager

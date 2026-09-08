@@ -41,6 +41,15 @@ npm run dev
 
 `backend/.env.example` lists every variable. The app boots without `DEEPSEEK_API_KEY` (stub answers) and without Chroma Cloud credentials (in-memory store). Re-ingest Cloud with `python scripts/migrate_to_chroma_cloud.py`.
 
+### Docker (one command)
+
+```bash
+# copy backend/.env.example → backend/.env first if you have not already
+docker compose up --build
+```
+
+Chroma Cloud / DeepSeek creds still come from `backend/.env`, same as the manual path. UI is at http://localhost:3000, API at http://localhost:8000. Tool-call lines persist in `logs/tool_calls.jsonl` on the host.
+
 ## Evaluation
 
 `evaluation/questions.json` has 15 questions across five categories: answerable RAG (including ticket 1103 / `ticket_106`, the only escalated bug), unsupported abstention, tool call, clarification, and refusal.

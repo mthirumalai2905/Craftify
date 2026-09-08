@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 from app.agent.tools import infer_priority
-from app.llm.provider import LLMProvider, StubProvider
+from app.llm.provider import LLMProvider, LLMResult, StubProvider
 from app.prompts.agent_prompt import AGENT_SYSTEM_PROMPT
 
 TICKET_RE = re.compile(
@@ -46,6 +46,9 @@ class RouteDecision:
     summary: str | None = None
     priority: str | None = None
     message: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 def _extract_summary(message: str) -> str:
@@ -71,12 +74,20 @@ def _heuristic_route(message: str) -> RouteDecision:
     return RouteDecision(route="rag")
 
 
+def _with_usage(decision: RouteDecision, usage: LLMResult) -> RouteDecision:
+    decision.prompt_tokens = usage.prompt_tokens
+    decision.completion_tokens = usage.completion_tokens
+    decision.total_tokens = usage.total_tokens
+    return decision
+
+
 def _llm_route(message: str, provider: LLMProvider) -> RouteDecision | None:
-    raw = provider.generate(
+    result = provider.generate(
         AGENT_SYSTEM_PROMPT,
         f"User message:\n{message}\n\nReturn the routing JSON only.",
         temperature=0.0,
     )
+    raw = result.text
     try:
         start = raw.find("{")
         end = raw.rfind("}")
@@ -87,25 +98,29 @@ def _llm_route(message: str, provider: LLMProvider) -> RouteDecision | None:
         return None
 
     route = data.get("route")
+    decision: RouteDecision | None = None
     if route == "rag":
-        return RouteDecision(route="rag")
-    if route == "tool_call":
+        decision = RouteDecision(route="rag")
+    elif route == "tool_call":
         summary = (data.get("summary") or "").strip()
         if len(summary) < 12:
-            return RouteDecision(route="clarification", message=CLARIFICATION_MESSAGE)
-        return RouteDecision(
-            route="tool_call",
-            summary=summary,
-            priority=data.get("priority") or infer_priority(message),
-        )
-    if route == "clarification":
-        return RouteDecision(
+            decision = RouteDecision(route="clarification", message=CLARIFICATION_MESSAGE)
+        else:
+            decision = RouteDecision(
+                route="tool_call",
+                summary=summary,
+                priority=data.get("priority") or infer_priority(message),
+            )
+    elif route == "clarification":
+        decision = RouteDecision(
             route="clarification",
             message=data.get("message") or CLARIFICATION_MESSAGE,
         )
-    if route == "refusal":
-        return RouteDecision(route="refusal", message=data.get("message") or REFUSAL_MESSAGE)
-    return None
+    elif route == "refusal":
+        decision = RouteDecision(route="refusal", message=data.get("message") or REFUSAL_MESSAGE)
+    if decision is None:
+        return None
+    return _with_usage(decision, result)
 
 
 def route_message(message: str, provider: LLMProvider) -> RouteDecision:

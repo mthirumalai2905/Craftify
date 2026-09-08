@@ -1,3 +1,3 @@
-from app.llm.provider import get_provider, LLMProvider
+from app.llm.provider import LLMProvider, LLMResult, get_provider
 
-__all__ = ["get_provider", "LLMProvider"]
+__all__ = ["LLMProvider", "LLMResult", "get_provider"]

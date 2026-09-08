@@ -1,4 +1,20 @@
-import type { AskResponse } from "@/lib/types";
+import type { AskResponse, UsageMeta } from "@/lib/types";
+
+function formatCost(usd: number): string {
+  if (usd > 0 && usd < 0.0001) {
+    return `$${usd.toFixed(6)}`;
+  }
+  return `$${usd.toFixed(4)}`;
+}
+
+function MetaFooter({ meta }: { meta?: UsageMeta }) {
+  if (!meta) return null;
+  const parts = [`${meta.elapsed_ms}ms`, `${meta.total_tokens} tokens`];
+  if (meta.estimated_cost_usd != null) {
+    parts.push(formatCost(meta.estimated_cost_usd));
+  }
+  return <p className="mt-3 text-[12px] text-zinc-400">{parts.join(" · ")}</p>;
+}
 
 const badges: Record<AskResponse["type"], { label: string; className: string }> = {
   answer: {
@@ -104,6 +120,8 @@ export function ResponseCard({ response }: { response: AskResponse }) {
       {response.type === "refusal" && (
         <p className="text-[15px] leading-6 text-red-700">{response.message}</p>
       )}
+
+      <MetaFooter meta={response.meta} />
     </article>
   );
 }
