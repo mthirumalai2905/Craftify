@@ -50,6 +50,10 @@ docker compose up --build
 
 Chroma Cloud / DeepSeek creds still come from `backend/.env`, same as the manual path. UI is at http://localhost:3000, API at http://localhost:8000. Tool-call lines persist in `logs/tool_calls.jsonl` on the host.
 
+## Bonus: multi-modal input
+
+Accepting a screenshot of a failed build, or a `minecraft/model/*.json` plus `minecraft/texture/*.png` from Part 4, would break the current text-only path: retrieval is Chroma Cloud hybrid search over Qwen dense + Splade sparse embeddings (`backend/app/rag/store.py`) of plain-text docs and tickets (`backend/app/rag/ingest.py`), generation is DeepSeek chat completions (`backend/app/llm/provider.py`) under a JSON system prompt that forbids anything outside retrieved chunks (`backend/app/prompts/rag_prompt.py`), and `AskRequest` / `router.py` only see the raw string. DeepSeek's text endpoint cannot take an image, so generation would need a vision-capable provider or a separate image-understanding pass before the existing chat call. The request path would grow an optional image field (base64 or upload) on `AskRequest` in `main.py`, then a fork: caption the attachment to text and reuse today's RAG/generation stack (cheaper), or send the image natively to a multimodal model (better grounding, but it steps around `rag_prompt.py`'s "retrieved text chunks only" rule because there is no text retrieval step for pixels). Matching an uploaded screenshot to the corpus would likewise need either an image embedding alongside Qwen/Splade in the Chroma schema, or caption-then-retrieve with the current text indexes unchanged — the second is the lower-lift fit for this schema. A failed-build screenshot or an uploaded model/texture is mostly diagnostic ("why does this look wrong") rather than something the text corpus can match, so that case wants a vision pass over the image plus the existing retrieved docs as context, not an image-to-image lookup.
+
 ## Evaluation
 
 `evaluation/questions.json` has 15 questions across five categories: answerable RAG (including ticket 1103 / `ticket_106`, the only escalated bug), unsupported abstention, tool call, clarification, and refusal.
